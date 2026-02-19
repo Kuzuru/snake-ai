@@ -11,66 +11,38 @@ from .memory import PrioritizedReplayBuffer, Transition
 from .state import StateBuilder
 
 
-def compute_reward(
-    result: StepResult,
-    prev_bfs: int,
-    loop_penalty: float = 0.0,
-) -> float:
-    """
-    Shaped reward function.
-    Food reward (10) dominates shaping terms (max ~1.5/step) to prevent reward hacking.
-
-    Uses BFS distance (not Manhattan) for the approach reward — Manhattan can be gamed
-    by circling (approaching in a straight line while the actual path length grows).
-    BFS measures the true navigable distance, so circling never looks like progress.
-    """
+def compute_reward(result: StepResult, prev_bfs: int = -1) -> float:
     if result.done:
         return -10.0
     if result.ate_food:
         return 10.0
 
-    reward = 0.0
+    reward = -0.01
 
-    # BFS-based approach signal: skip when either value is -1 (unreachable)
     if prev_bfs > 0 and result.bfs_to_food > 0:
         if result.bfs_to_food < prev_bfs:
-            reward += 0.5
+            reward += 0.3
         elif result.bfs_to_food > prev_bfs:
-            reward -= 0.5
+            reward -= 0.3
 
-    # Self-trap early warning: food is BFS-unreachable
     if result.bfs_to_food < 0:
-        reward -= 2.0
-
-    # Loop penalty: injected from training loop (see TrainingLoop._run_episode)
-    reward += loop_penalty
+        reward -= 1.5
 
     return reward
 
 
 class DuelingDDQNAgent:
-    """
-    Dueling Double DQN agent with Prioritized Experience Replay.
-
-    Usage:
-        agent = DuelingDDQNAgent(config, device)
-        grid, scalars = agent.state_builder.build()
-        action = agent.get_action(grid, scalars)
-        ...
-        agent.store(Transition(...))
-        loss = agent.learn()
-    """
 
     def __init__(self, config: Config, device: torch.device) -> None:
         self.config = config
         self.device = device
 
         self.online_net = DuelingCNN(
-            config.grid_h, config.grid_w, n_scalars=8, n_actions=3
+            config.grid_h, config.grid_w, n_scalars=12, n_actions=3
         ).to(device)
 
         self.target_net = DuelingCNN(
-            config.grid_h, config.grid_w, n_scalars=8, n_actions=3
+            config.grid_h, config.grid_w, n_scalars=12, n_actions=3
         ).to(device)
 
         self.trainer = DDQNTrainer(
@@ -92,12 +64,10 @@ class DuelingDDQNAgent:
         self._beta = config.per_beta_start
 
     def attach_game(self, game: SnakeGame) -> None:
-        """Attach a game instance to build states from."""
         self.game = game
         self.state_builder = StateBuilder(game)
 
     def get_action(self, grid: np.ndarray, scalars: np.ndarray) -> int:
-        """Epsilon-greedy action selection. Returns 0/1/2."""
         if np.random.random() < self.epsilon:
             return int(np.random.randint(0, 3))
 
@@ -112,12 +82,10 @@ class DuelingDDQNAgent:
         self.memory.push(transition)
 
     def learn(self) -> float | None:
-        """Sample a batch and perform one training step. Returns loss or None."""
         cfg = self.config
         if len(self.memory) < cfg.batch_size:
             return None
 
-        # Anneal beta linearly toward 1.0 over training
         self._beta = min(
             cfg.per_beta_end,
             cfg.per_beta_start
@@ -126,7 +94,6 @@ class DuelingDDQNAgent:
 
         transitions, indices, is_weights = self.memory.sample(cfg.batch_size, self._beta)
 
-        # Collate into batched tensors
         grids = torch.tensor(
             np.stack([t.state_grid for t in transitions]), dtype=torch.float32
         ).to(self.device)
@@ -157,13 +124,8 @@ class DuelingDDQNAgent:
 
         self.memory.update_priorities(indices, td_errors)
 
-        # Decay epsilon multiplicatively (never goes negative)
         self.epsilon = max(cfg.epsilon_end, self.epsilon * cfg.epsilon_decay)
-
         self._steps += 1
-
-        # Hard-sync target network every N steps
-        if self._steps % cfg.target_update_freq == 0:
-            self.trainer.sync_target()
+        self.trainer.soft_update_target(tau=cfg.tau)
 
         return loss

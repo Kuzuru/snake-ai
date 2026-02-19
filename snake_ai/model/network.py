@@ -6,26 +6,16 @@ import torch.nn as nn
 
 
 class DuelingCNN(nn.Module):
-    """
-    Dueling Double DQN network with two input branches:
-      - CNN branch:    processes the (3, H, W) grid
-      - Scalar branch: processes the 8 hand-crafted features
-
-    Output: Q-values tensor of shape (B, n_actions).
-
-    Dueling formula: Q(s,a) = V(s) + A(s,a) - mean_a(A(s,a))
-    """
 
     def __init__(
         self,
         grid_h: int,
         grid_w: int,
-        n_scalars: int = 8,
+        n_scalars: int = 12,
         n_actions: int = 3,
     ) -> None:
         super().__init__()
 
-        # ── CNN branch ────────────────────────────────────────────────
         self.conv = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -36,11 +26,10 @@ class DuelingCNN(nn.Module):
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((4, 4)),  # grid-size agnostic
+            nn.AdaptiveAvgPool2d((4, 4)),
         )
-        cnn_out = 64 * 4 * 4  # 1024
+        cnn_out = 64 * 4 * 4
 
-        # ── Scalar branch ─────────────────────────────────────────────
         self.scalar_net = nn.Sequential(
             nn.Linear(n_scalars, 64),
             nn.ReLU(inplace=True),
@@ -48,10 +37,8 @@ class DuelingCNN(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        combined = cnn_out + 64  # 1088
+        combined = cnn_out + 64
 
-        # ── Shared FC ─────────────────────────────────────────────────
-        # LayerNorm (not BatchNorm) - behaves correctly at batch_size=1 during inference
         self.shared = nn.Sequential(
             nn.Linear(combined, 512),
             nn.LayerNorm(512),
@@ -59,7 +46,6 @@ class DuelingCNN(nn.Module):
             nn.Dropout(0.1),
         )
 
-        # ── Dueling streams ───────────────────────────────────────────
         self.value_stream = nn.Sequential(
             nn.Linear(512, 256),
             nn.ReLU(inplace=True),
@@ -72,22 +58,14 @@ class DuelingCNN(nn.Module):
         )
 
     def forward(self, grid: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            grid:    (B, 3, H, W) float32
-            scalars: (B, 8)       float32
-        Returns:
-            Q-values (B, n_actions)
-        """
-        cnn_feat = self.conv(grid).flatten(start_dim=1)       # (B, 1024)
-        scalar_feat = self.scalar_net(scalars)                 # (B, 64)
-        combined = torch.cat([cnn_feat, scalar_feat], dim=1)  # (B, 1088)
-        shared = self.shared(combined)                         # (B, 512)
+        cnn_feat = self.conv(grid).flatten(start_dim=1)
+        scalar_feat = self.scalar_net(scalars)
+        combined = torch.cat([cnn_feat, scalar_feat], dim=1)
+        shared = self.shared(combined)
 
-        value = self.value_stream(shared)                      # (B, 1)
-        advantage = self.advantage_stream(shared)              # (B, n_actions)
+        value = self.value_stream(shared)
+        advantage = self.advantage_stream(shared)
 
-        # Q = V + (A - mean(A))  - mean subtraction improves identifiability
         q = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return q
 
@@ -103,7 +81,7 @@ class DuelingCNN(nn.Module):
         grid_h: int,
         grid_w: int,
         device: torch.device,
-        n_scalars: int = 8,
+        n_scalars: int = 12,
         n_actions: int = 3,
     ) -> "DuelingCNN":
         model = cls(grid_h, grid_w, n_scalars=n_scalars, n_actions=n_actions)

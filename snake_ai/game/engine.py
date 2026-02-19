@@ -10,20 +10,11 @@ class StepResult(NamedTuple):
     score: int
     ate_food: bool
     manhattan_to_food: int
-    bfs_to_food: int          # -1 if food is unreachable (self-trap)
+    bfs_to_food: int
     steps_without_food: int
 
 
 class SnakeGame:
-    """
-    Unified game engine for both human play and AI training.
-
-    When used for AI:
-        result = game.play_step(action=[1,0,0])   # straight / right / left
-    When used for human play:
-        result = game.play_step()                  # reads direction from renderer
-    Rendering is optional - pass renderer=None for headless/fast training.
-    """
 
     def __init__(
         self,
@@ -38,18 +29,18 @@ class SnakeGame:
         self._max_steps_no_food = max_steps_no_food
         self.reset()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def reset(self) -> None:
         cx, cy = self.grid_w // 2, self.grid_h // 2
-        self.direction = Direction.RIGHT
-        self.snake: deque[Point] = deque([
-            Point(cx, cy),
-            Point(cx - 1, cy),
-            Point(cx - 2, cy),
-        ])
+        self.direction = random.choice(list(Direction))
+        if self.direction == Direction.RIGHT:
+            body = [Point(cx, cy), Point(cx - 1, cy), Point(cx - 2, cy)]
+        elif self.direction == Direction.LEFT:
+            body = [Point(cx, cy), Point(cx + 1, cy), Point(cx + 2, cy)]
+        elif self.direction == Direction.DOWN:
+            body = [Point(cx, cy), Point(cx, cy - 1), Point(cx, cy - 2)]
+        else:
+            body = [Point(cx, cy), Point(cx, cy + 1), Point(cx, cy + 2)]
+        self.snake: deque[Point] = deque(body)
         self.head: Point = self.snake[0]
         self.score: int = 0
         self.steps: int = 0
@@ -57,14 +48,9 @@ class SnakeGame:
         self._place_food()
 
     def play_step(self, action: Optional[list] = None) -> StepResult:
-        """
-        action: [1,0,0]=straight, [0,1,0]=right, [0,0,1]=left  (AI mode)
-                None = read from pygame keyboard                  (human mode)
-        """
         self.steps += 1
         self.steps_without_food += 1
 
-        # Handle events / get direction
         if self.renderer is not None:
             if action is not None:
                 self.renderer.handle_events()
@@ -119,12 +105,7 @@ class SnakeGame:
         )
 
     def is_collision(self, pt: Optional[Point] = None) -> bool:
-        """Public collision check for state building (lookahead)."""
         return self._is_collision(pt if pt is not None else self.head)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _place_food(self) -> None:
         occupied = set(self.snake)
@@ -135,19 +116,18 @@ class SnakeGame:
             if Point(x, y) not in occupied
         ]
         if not free:
-            # Board completely full - agent has won
             self.food = None
         else:
             self.food = random.choice(free)
 
     def _action_to_direction(self, action: list) -> Direction:
-        dirs = list(Direction)  # ordered clockwise
+        dirs = list(Direction)
         idx = int(self.direction)
-        if action[0]:     # straight
+        if action[0]:
             return self.direction
-        elif action[1]:   # turn right (clockwise)
+        elif action[1]:
             return dirs[(idx + 1) % 4]
-        else:             # turn left (counter-clockwise)
+        else:
             return dirs[(idx - 1) % 4]
 
     def _advance_head(self) -> Point:
@@ -165,8 +145,9 @@ class SnakeGame:
     def _is_collision(self, pt: Point) -> bool:
         if not (0 <= pt.x < self.grid_w and 0 <= pt.y < self.grid_h):
             return True
-        # Head is not yet in snake when checking next-step collision
-        return pt in set(self.snake)
+        # tail moves away on next step so exclude it
+        body_without_tail = set(list(self.snake)[:-1])
+        return pt in body_without_tail
 
     def _manhattan(self) -> int:
         if self.food is None:
@@ -174,10 +155,8 @@ class SnakeGame:
         return abs(self.head.x - self.food.x) + abs(self.head.y - self.food.y)
 
     def _bfs_to_food(self) -> int:
-        """BFS from head to food. Returns -1 if food is unreachable."""
         if self.food is None:
             return 0
-        # Treat snake body except head as obstacles
         occupied = set(list(self.snake)[1:])
         queue: deque[tuple[Point, int]] = deque([(self.head, 0)])
         visited = {self.head}
@@ -196,3 +175,24 @@ class SnakeGame:
                     visited.add(nxt)
                     queue.append((nxt, dist + 1))
         return -1
+
+    def flood_fill(self, start: Point, blocked: set) -> int:
+        if not (0 <= start.x < self.grid_w and 0 <= start.y < self.grid_h):
+            return 0
+        if start in blocked:
+            return 0
+        visited: set[Point] = {start}
+        queue: deque[Point] = deque([start])
+        while queue:
+            pos = queue.popleft()
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nxt = Point(pos.x + dx, pos.y + dy)
+                if (
+                    nxt not in visited
+                    and nxt not in blocked
+                    and 0 <= nxt.x < self.grid_w
+                    and 0 <= nxt.y < self.grid_h
+                ):
+                    visited.add(nxt)
+                    queue.append(nxt)
+        return len(visited)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from pathlib import Path
 
 import torch
@@ -22,13 +21,6 @@ def _action_int_to_list(action: int) -> list[int]:
 
 
 class TrainingLoop:
-    """
-    Orchestrates the full training lifecycle:
-      - Creates game, agent, renderer (optional)
-      - Runs episodes
-      - Handles checkpointing
-      - Logs metrics to terminal and/or pygame stats panel
-    """
 
     def __init__(self, config: Config, render: bool = False, speed: int = SPEED_AI) -> None:
         self.config = config
@@ -49,7 +41,6 @@ class TrainingLoop:
         self.agent.attach_game(self.game)
 
         self.metrics = MetricsTracker()
-        # Terminal plotter only shown when running headless (no pygame window)
         self.plotter = TerminalPlotter() if not render else None
 
         self._checkpoint_dir = Path(config.checkpoint_dir)
@@ -60,23 +51,19 @@ class TrainingLoop:
         print(f"Memory: {config.memory_size:,}  Batch: {config.batch_size}")
         print("-" * 60)
         if not render:
-            # Reserve blank space for the terminal plotter
             print("\n" * 12)
 
-    # ------------------------------------------------------------------
-    # Public
-    # ------------------------------------------------------------------
-
     def run(self, max_games: int = 10_000) -> None:
-        while self.agent.n_games < max_games:
-            self._run_episode()
+        try:
+            while self.agent.n_games < max_games:
+                self._run_episode()
 
-            renderer = self.game.renderer
-            if renderer is not None and renderer.quit_requested:
-                break
-
-        print("\nTraining complete.")
-        self._save_checkpoint("final.pth")
+                renderer = self.game.renderer
+                if renderer is not None and renderer.quit_requested:
+                    break
+        finally:
+            print("\nTraining complete.")
+            self._save_checkpoint("final.pth")
 
     def load_checkpoint(self, path: str) -> None:
         p = Path(path)
@@ -88,37 +75,19 @@ class TrainingLoop:
         self.metrics.best_score = state.get("best_score", 0)
         print(f"Resumed from {p}  (game {self.agent.n_games})")
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
     def _run_episode(self) -> None:
         self.game.reset()
         stats = EpisodeStats()
-        prev_bfs = self.game._bfs_to_food()
-
-        # Loop detection: penalise revisiting positions within a sliding window.
-        # Window = 20 steps - large enough to catch typical circles (4-16 steps),
-        # small enough to not fire on legitimate backtracking by a longer snake.
-        _LOOP_WINDOW = 20
-        _LOOP_PENALTY = -0.3
-        recent_heads: deque = deque(maxlen=_LOOP_WINDOW)
 
         while True:
             grid, scalars = self.agent.state_builder.build()
             action_int = self.agent.get_action(grid, scalars)
             action_list = _action_int_to_list(action_int)
 
+            prev_bfs = self.game._bfs_to_food()
             result = self.game.play_step(action_list)
 
-            # Check for loop BEFORE appending so we compare against prior visits
-            loop_penalty = _LOOP_PENALTY if self.game.head in recent_heads else 0.0
-            recent_heads.append(self.game.head)
-
-            reward = compute_reward(result, prev_bfs, loop_penalty)
-            # Only update prev_bfs when food is reachable (keep last valid value otherwise)
-            if result.bfs_to_food >= 0:
-                prev_bfs = result.bfs_to_food
+            reward = compute_reward(result, prev_bfs)
 
             grid_new, scalars_new = self.agent.state_builder.build()
             self.agent.store(
@@ -140,23 +109,20 @@ class TrainingLoop:
                 stats.loss_sum += loss
                 stats.loss_count += 1
 
-            if result.done:
+            renderer = self.game.renderer
+            if result.done or (renderer is not None and renderer.quit_requested):
                 stats.score = result.score
                 break
 
-        # -- End of episode -----------------------------------------------
         self.agent.n_games += 1
         self.metrics.record(stats)
 
-        # Save best model
         if stats.score >= self.metrics.best_score:
             self._save_checkpoint("best.pth", stats.score)
 
-        # Periodic checkpoint
         if self.agent.n_games % self.config.save_every_n_games == 0:
             self._save_checkpoint(f"game_{self.agent.n_games:06d}.pth", stats.score)
 
-        # Update stats panel (pygame) or terminal plotter (headless)
         if self.agent.n_games % self.config.plot_update_freq == 0:
             renderer = self.game.renderer
             if renderer is not None:
